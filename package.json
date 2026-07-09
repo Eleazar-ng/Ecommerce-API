@@ -4,15 +4,32 @@
   "description": "E-Commerce platform with cart and payment gateway integration.",
   "license": "ISC",
   "author": "Eleazar-ng",
-  "type": "commonjs",
+  "type": "module",
   "main": "dist/server.js",
   "scripts": {
-    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "dev": "tsx watch src/server.ts",
     "start": "npm run build && node dist/server.js",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "tsc"
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "seed:super-admin": "tsx src/seeders/superAdmin.seeder.ts"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1"
+    "@types/cookie-parser": "^1.4.10",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/morgan": "^1.9.10",
+    "@types/node": "^26.1.1",
+    "tsx": "^4.23.0"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "helmet": "^8.2.0",
+    "mongoose": "^9.7.4",
+    "morgan": "^1.11.0",
+    "zod": "^4.4.3"
   }
 }
