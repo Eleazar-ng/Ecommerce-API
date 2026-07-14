@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import authRoutes from './auth.route.js';
+import adminRoutes from './admin.route.js';
 
 const router = Router();
 
@@ -8,6 +10,8 @@ router.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+router.use('/auth', authRoutes);
+// router.use('/admin', adminRoutes);
 
 // Further feature routers get mounted here as later stages build them, e.g.:
 // import productRoutes from './product.routes.js';
