@@ -11,7 +11,7 @@ router.get('/health', (req, res) => {
 });
 
 router.use('/auth', authRoutes);
-// router.use('/admin', adminRoutes);
+router.use('/admin', adminRoutes);
 
 // Further feature routers get mounted here as later stages build them, e.g.:
 // import productRoutes from './product.routes.js';
