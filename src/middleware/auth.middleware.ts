@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { User } from '../models/index.js';
 import type { UserRole } from '../models/index.js';
-import { AppError } from '../utils/appError.js';
+import { UnauthorizedError, ForbiddenError } from '../utils/appError.js';
 import { verifyAccessToken } from '../utils/token.js';
 
 // Verifies the JWT AND re-checks isSuspended against the DB on every request — not just at
@@ -12,7 +12,7 @@ export async function protect(req: Request, res: Response, next: NextFunction): 
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) {
-      throw new AppError('Not authenticated', 401);
+      throw new UnauthorizedError('Not authenticated');
     }
 
     const token = authHeader.split(' ')[1];
@@ -20,15 +20,15 @@ export async function protect(req: Request, res: Response, next: NextFunction): 
     try {
       decoded = verifyAccessToken(token);
     } catch {
-      throw new AppError('Invalid or expired token', 401);
+      throw new UnauthorizedError('Invalid or expired token');
     }
 
     const user = await User.findById(decoded.sub);
     if (!user) {
-      throw new AppError('User no longer exists', 401);
+      throw new UnauthorizedError('User no longer exists');
     }
     if (user.isSuspended) {
-      throw new AppError('This account has been suspended', 403);
+      throw new ForbiddenError('This account has been suspended');
     }
 
     req.user = user;
@@ -42,7 +42,7 @@ export async function protect(req: Request, res: Response, next: NextFunction): 
 export function restrictTo(...allowedRoles: UserRole[]) {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (!allowedRoles.includes(req.user.role)) {
-      return next(new AppError('You do not have permission to perform this action', 403));
+      return next(new ForbiddenError('You do not have permission to perform this action'));
     }
     next();
   };
@@ -59,6 +59,6 @@ export function requirePermission(permission: string) {
     if (req.user.role === 'admin' && req.user.permissions.includes(permission)) {
       return next();
     }
-    return next(new AppError(`Missing required permission: ${permission}`, 403));
+    return next(new ForbiddenError(`Missing required permission: ${permission}`));
   };
 }
