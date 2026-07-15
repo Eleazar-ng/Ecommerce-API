@@ -22,11 +22,11 @@ router.post('/refresh', authController.refresh);
 router.post('/forgot-password', validate(forgotPasswordSchema), authController.forgotPassword);
 router.post('/reset-password/:token', validate(resetPasswordSchema), authController.resetPassword);
 router.get('/verify-email/:token', validate(verifyEmailSchema), authController.verifyEmail);
-// router.post(
-//   '/complete-admin-setup/:token',
-//   validate(completeAdminSetupSchema),
-//   authController.completeAdminSetup
-// );
+router.post(
+  '/complete-admin-setup/:token',
+  validate(completeAdminSetupSchema),
+  authController.completeAdminSetup
+);
 
 // Authenticated
 router.post('/logout', protect, authController.logout);
