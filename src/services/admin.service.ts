@@ -1,5 +1,5 @@
 import User from '../models/User.js';
-import { AppError } from '../utils/appError.js';
+import { ConflictError, NotFoundError } from '../utils/appError.js';
 import { generateSecureToken } from '../utils/hash.js';
 import { sendAdminInviteEmail } from './email.service.js';
 
@@ -37,7 +37,7 @@ export async function inviteAdmin({
   const existing = await User.findOne({ $or: [{ email }, { username }] });
   if (existing) {
     const field = existing.email === email ? 'email' : 'username';
-    throw new AppError(`This ${field} is already registered`, 409);
+    throw new ConflictError(`This ${field} is already registered`);
   }
 
   const user = new User({
@@ -70,7 +70,7 @@ export async function inviteAdmin({
 export async function updateAdminPermissions(adminId: string | any, permissions: Permission[]) {
   const admin = await User.findOne({ _id: adminId, role: 'admin' });
   if (!admin) {
-    throw new AppError('Admin not found', 404);
+    throw new NotFoundError('Admin not found');
   }
 
   admin.permissions = permissions;
