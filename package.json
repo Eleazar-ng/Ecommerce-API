@@ -12,7 +12,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "seed:super-admin": "tsx src/seeders/superAdmin.seeder.ts"
+    "seed:super-admin": "tsx src/seeders/superAdmin.seeder.ts",
+    "seed:test-products": "tsx src/seeders/testProducts.seeder.ts"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
