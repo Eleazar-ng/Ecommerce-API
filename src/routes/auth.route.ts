@@ -30,6 +30,7 @@ router.post(
 
 // Authenticated
 router.post('/logout', protect, authController.logout);
+router.post('/resend-verification-email', protect, authController.resendVerificationEmail);
 router.get('/me', protect, authController.getMe);
 
 export default router;

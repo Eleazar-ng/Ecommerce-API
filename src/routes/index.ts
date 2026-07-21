@@ -2,6 +2,9 @@ import { Router } from 'express';
 import authRoutes from './auth.route.js';
 import adminRoutes from './admin.route.js';
 import cartRoutes from "./cart.routes.js";
+import checkoutRoutes from './checkout.route.js';
+import orderRoutes from './order.route.js';
+import meRoutes from './me.route.js';
 
 const router = Router();
 
@@ -14,6 +17,9 @@ router.get('/health', (req, res) => {
 router.use('/auth', authRoutes);
 router.use('/admin', adminRoutes);
 router.use("/cart", cartRoutes);
+router.use('/checkout', checkoutRoutes);
+router.use('/orders', orderRoutes);
+router.use('/me', meRoutes);
 
 // Further feature routers get mounted here as later stages build them, e.g.:
 // import productRoutes from './product.routes.js';

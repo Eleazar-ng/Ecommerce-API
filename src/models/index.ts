@@ -10,4 +10,13 @@ export type { IProduct, ProductDocument } from './Product.js';
 export { default as Cart } from './Cart.js';
 export type { ICart, ICartItem, CartDocument } from './Cart.js';
 
+export { default as Order } from './Order.js';
+export type { IOrder, IOrderItem, OrderStatus, IShippingAddress, OrderDocument } from './Order.js';
 
+export { default as Transaction } from './Transaction.js';
+export type {
+  ITransaction,
+  TransactionType,
+  TransactionStatus,
+  TransactionDocument,
+} from './Transaction.js';

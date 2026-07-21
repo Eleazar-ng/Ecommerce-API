@@ -234,6 +234,28 @@ export async function resetPassword(rawToken: string | any, newPassword: string)
   await user.save();
 }
 
+// --- Resend verification email ---
+// The only way to get a verification token was at signup, with a 24h expiry. Without this,
+// anyone whose link expired (or who lost the email) would be permanently stuck unverified —
+// which, as of Stage 6, also means permanently blocked from checkout. Takes the full user
+// document (from req.user, already fetched by `protect`) rather than an id, same reasoning
+// as checkout.service.ts — avoids a redundant lookup.
+export async function resendVerificationEmail(user: UserDocument): Promise<void> {
+  if (user.isEmailVerified) {
+    throw new BadRequestError('This email is already verified');
+  }
+ 
+  // Overwriting the hash/expiry naturally invalidates any previous unexpired link too —
+  // if someone had two verification emails in their inbox, only the newest one would work
+  // after this. That's intentional: a single active token per user is simpler to reason
+  // about than tracking multiple valid tokens.
+  const { raw } = generateSecureToken();
+  user.emailVerificationTokenHash = hashToken(raw);
+  user.emailVerificationExpires = new Date(Date.now() + VERIFY_TOKEN_TTL_MS);
+  await user.save();
+  await sendVerificationEmail(user.email, raw);
+}
+
 // --- Email verification ---
 export async function verifyEmail(rawToken: string | any): Promise<void> {
   const tokenHash = hashToken(rawToken);
