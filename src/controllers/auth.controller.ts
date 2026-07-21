@@ -65,6 +65,11 @@ export const completeAdminSetup = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, data: { user, accessToken } });
 });
 
+export const resendVerificationEmail = asyncHandler(async (req, res) => {
+  await authService.resendVerificationEmail(req.user);
+  res.status(200).json({ success: true, message: 'Verification email sent' });
+});
+
 export const getMe = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
