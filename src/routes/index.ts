@@ -5,6 +5,7 @@ import cartRoutes from "./cart.routes.js";
 import checkoutRoutes from './checkout.route.js';
 import orderRoutes from './order.route.js';
 import meRoutes from './me.route.js';
+import categoryRoutes from './category.route.js';
 
 const router = Router();
 
@@ -20,6 +21,7 @@ router.use("/cart", cartRoutes);
 router.use('/checkout', checkoutRoutes);
 router.use('/orders', orderRoutes);
 router.use('/me', meRoutes);
+router.use('/categories', categoryRoutes);
 
 // Further feature routers get mounted here as later stages build them, e.g.:
 // import productRoutes from './product.routes.js';
