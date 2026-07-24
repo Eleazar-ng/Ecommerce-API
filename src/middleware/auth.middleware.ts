@@ -38,6 +38,31 @@ export async function protect(req: Request, res: Response, next: NextFunction): 
   }
 }
 
+// optionalAuth: for routes that are public but behave differently for an authenticated
+// admin (e.g. product listing exposing includeInactive). Attaches req.user if a valid,
+// non-suspended token is present; silently proceeds as anonymous otherwise. NEVER rejects
+// the request — an invalid/expired/missing token on an optional-auth route is not an error,
+// it just means the caller is treated as anonymous.
+export async function optionalAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    return next();
+  }
+ 
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = verifyAccessToken(token);
+    const user = await User.findById(decoded.sub);
+    if (user && !user.isSuspended) {
+      req.user = user;
+    }
+  } catch {
+    // Invalid or expired token on an optional route — proceed anonymously rather than
+    // rejecting. Only `protect` treats this as an error.
+  }
+  next();
+}
+
 // restrictTo('admin', 'super_admin') — role-level gate, checked after protect()
 export function restrictTo(...allowedRoles: UserRole[]) {
   return (req: Request, res: Response, next: NextFunction): void => {
