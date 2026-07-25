@@ -30,6 +30,17 @@ app.use(
 // through the shared routes/index.ts router — that router sits behind express.json().
 app.use('/api/v1/webhooks', express.raw({ type: 'application/json' }), webhookRoutes);
 
+// Middleware to set query property.
+app.use((req, res, next) => {
+    Object.defineProperty(req, 'query', {
+        value: { ...req.query },
+        writable: true,
+        configurable: true,
+        enumerable: true
+    });
+    next();
+});
+
 // NOTE: the Stripe webhook route (built in Stage 6) MUST receive the raw request body to
 // verify the signature — it needs to be mounted with express.raw() BEFORE this express.json()
 // middleware runs, or signature verification will fail.
