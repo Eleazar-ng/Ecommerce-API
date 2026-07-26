@@ -11,7 +11,7 @@ export interface IOrderItem {
   quantity: number;
 }
 
-export type OrderStatus = 'pending' | 'paid' | 'failed' | 'cancelled' | 'refunded';
+export type OrderStatus = 'pending' | 'paid' | 'failed' | 'cancelled' | 'refunded'| 'shipped' | 'delivered';
 
 export interface IShippingAddress {
   line1: string;
@@ -88,7 +88,7 @@ const orderSchema = new Schema<IOrder>(
     // status directly — otherwise two writers can race or disagree.
     status: {
       type: String,
-      enum: ['pending', 'paid', 'failed', 'cancelled', 'refunded'],
+      enum: ['pending', 'paid', 'failed', 'cancelled', 'refunded', 'shipped', 'delivered'],
       default: 'pending',
     },
     shippingAddress: {
