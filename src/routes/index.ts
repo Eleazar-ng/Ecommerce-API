@@ -7,6 +7,7 @@ import orderRoutes from './order.route.js';
 import meRoutes from './me.route.js';
 import categoryRoutes from './category.route.js';
 import productRoutes from './product.route.js';
+import dashboardRoutes from './dashboard.route.js';
 
 const router = Router();
 
@@ -24,6 +25,7 @@ router.use('/orders', orderRoutes);
 router.use('/me', meRoutes);
 router.use('/categories', categoryRoutes);
 router.use('/products', productRoutes);
+router.use('/dashboard', dashboardRoutes);
 
 // Further feature routers get mounted here as later stages build them, e.g.:
 // import productRoutes from './product.routes.js';
