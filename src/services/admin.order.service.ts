@@ -18,7 +18,7 @@ interface PaginatedResult<T> {
   totalPages: number;
 }
 
-export async function listAllOrders(params: ListAllOrdersParams): Promise<PaginatedResult<OrderDocument>> {
+export async function listAllOrders(params: ListAllOrdersParams | any): Promise<PaginatedResult<OrderDocument>> {
   const { status, page, limit } = params;
   const filter: Record<string, unknown> = {};
   if (status) filter.status = status;
@@ -32,7 +32,7 @@ export async function listAllOrders(params: ListAllOrdersParams): Promise<Pagina
   return { items, page, limit, total, totalPages: Math.ceil(total / limit) };
 }
 
-export async function getAnyOrder(id: string) {
+export async function getAnyOrder(id: string|any) {
   const order = await Order.findById(id);
   if (!order) {
     throw new NotFoundError('Order not found');
@@ -50,7 +50,7 @@ const ALLOWED_TRANSITIONS: Partial<Record<OrderStatus, OrderStatus[]>> = {
   shipped: ['delivered'],
 };
 
-export async function updateOrderStatus(id: string, nextStatus: 'shipped' | 'delivered') {
+export async function updateOrderStatus(id: string|any, nextStatus: 'shipped' | 'delivered') {
   const order = await Order.findById(id);
   if (!order) {
     throw new NotFoundError('Order not found');
@@ -74,7 +74,7 @@ export async function updateOrderStatus(id: string, nextStatus: 'shipped' | 'del
 // webhook writes Order.status" from Stage 6. This just kicks off the refund with Stripe and
 // returns its immediate response; the order's status updates asynchronously once the
 // charge.refunded webhook lands — same async pattern as checkout itself.
-export async function initiateRefund(id: string) {
+export async function initiateRefund(id: string | any) {
   const order = await Order.findById(id);
   if (!order) {
     throw new NotFoundError('Order not found');

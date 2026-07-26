@@ -24,6 +24,9 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
     case 'payment_intent.payment_failed':
       await handlePaymentFailed(event);
       break;
+    case 'charge.refunded':
+      await handleChargeRefunded(event);
+      break;  
     default:
       // Stripe sends many event types this app doesn't act on. Acknowledging (not erroring)
       // tells Stripe delivery succeeded, so it won't keep retrying an event we're
@@ -135,3 +138,54 @@ async function handlePaymentFailed(event: Stripe.Event): Promise<void> {
   // Deliberately NOT touching cart or stock — the user should be able to fix their payment
   // method and retry checkout without losing what was in their cart.
 }
+
+// Completes the refund flow initiated by admin-order.service.ts's initiateRefund(). That
+// function deliberately never touches Order.status itself — this handler does, preserving
+// "only the webhook writes Order.status" from Stage 6, now covering the refund path too.
+async function handleChargeRefunded(event: Stripe.Event): Promise<void> {
+  const charge = event.data.object as Stripe.Charge;
+  const paymentIntentId =
+    typeof charge.payment_intent === 'string' ? charge.payment_intent : charge.payment_intent?.id;
+ 
+  if (!paymentIntentId) {
+    console.error(`charge.refunded (${charge.id}) missing payment_intent reference`);
+    return;
+  }
+ 
+  // Unlike the payment success/failure handlers, there's no metadata round-trip needed
+  // here — Order already stores stripePaymentIntentId (set at checkout), so the order can
+  // be found directly by matching it against the charge's payment_intent.
+  const order = await Order.findOne({ stripePaymentIntentId: paymentIntentId });
+  if (!order) {
+    console.error(`No order found for refunded charge ${charge.id} (paymentIntent ${paymentIntentId})`);
+    return;
+  }
+ 
+  try {
+    await Transaction.create({
+      userId: order.userId,
+      orderId: order._id,
+      type: 'refund',
+      status: 'succeeded',
+      amountCents: charge.amount_refunded,
+      currency: charge.currency,
+      stripePaymentIntentId: paymentIntentId,
+      stripeEventId: event.id,
+    });
+  } catch (err) {
+    if (isDuplicateEventError(err)) {
+      console.log(`Duplicate webhook event ${event.id} — already processed, skipping`);
+      return;
+    }
+    throw err;
+  }
+ 
+  // Deliberately NOT restocking inventory automatically — whether a returned/refunded item
+  // goes back into sellable stock is a manual, often inspection-dependent decision in real
+  // retail operations (was the item actually returned? is it resellable?), not something
+  // safe to automate from a webhook alone.
+  order.status = 'refunded';
+  await order.save();
+}
+ 
+ 
