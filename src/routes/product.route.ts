@@ -8,6 +8,7 @@ import {
   updateStockSchema,
   getProductSchema,
   listProductsSchema,
+  lowStockQuerySchema
 } from '../validations/product.validation.js';
 
 const router = Router();
@@ -21,6 +22,21 @@ const requireInventoryManagement = [protect, restrictTo('admin', 'super_admin'),
 // Public reads — optionalAuth means an admin's token (if sent) unlocks includeInactive,
 // but no token at all is required for ordinary browsing.
 router.get('/', optionalAuth, validate(listProductsSchema), productController.listProducts);
+
+// NOTE: registered BEFORE '/:id' below. '/low-stock' is a literal path, but Express's
+// ':id' param would otherwise happily match the literal string "low-stock" too, since
+// both are single path segments — whichever is registered first wins the match.
+router.get(
+  '/low-stock',
+  ...requireInventoryManagement,
+  validate(lowStockQuerySchema),
+  productController.listLowStockProducts
+);
+
+// NOTE: also registered BEFORE '/:id', same reasoning as '/low-stock' above — Express
+// would otherwise match the literal "upload-signature" against the ':id' param pattern.
+router.post('/upload-signature', ...requireProductManagement, productController.getUploadSignature);
+
 router.get('/:id', optionalAuth, validate(getProductSchema), productController.getProduct);
 
 // Admin writes

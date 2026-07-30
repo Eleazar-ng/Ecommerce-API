@@ -3,6 +3,14 @@ import { isValidObjectId } from 'mongoose';
 
 const objectIdSchema = z.string().refine(isValidObjectId, { message: 'Invalid id' });
 
+// Matches IProductImage exactly — the client gets both `url` and `publicId` back from
+// Cloudinary at upload time (see upload.service.ts) and must send both here. publicId is
+// what makes the image deletable later; a bare URL string isn't reliably reversible into one.
+const productImageSchema = z.object({
+  url: z.string().url(),
+  publicId: z.string().min(1),
+});
+
 export const createProductSchema = z.object({
   body: z.object({
     name: z.string().min(1).max(200),
@@ -10,7 +18,7 @@ export const createProductSchema = z.object({
     priceCents: z.number().int().min(0),
     stock: z.number().int().min(0).default(0),
     categoryId: objectIdSchema,
-    images: z.array(z.url()).default([]),
+    images: z.array(productImageSchema).default([]),
     tags: z.array(z.string()).default([]),
   }),
 });
@@ -23,7 +31,7 @@ export const updateProductSchema = z.object({
       description: z.string().max(5000).optional(),
       priceCents: z.number().int().min(0).optional(),
       categoryId: objectIdSchema.optional(),
-      images: z.array(z.string().url()).optional(),
+      images: z.array(productImageSchema).optional(),
       tags: z.array(z.string()).optional(),
       isActive: z.boolean().optional(),
       // NOTE: `stock` is deliberately NOT accepted here. Inventory changes go through
@@ -44,6 +52,14 @@ export const updateStockSchema = z.object({
 export const getProductSchema = z.object({
   params: z.object({ id: objectIdSchema }),
 });
+
+export const lowStockQuerySchema = z.object({
+  query: z.object({
+    threshold: z.coerce.number().int().min(0).default(5),
+  }),
+});
+
+export type LowStockQuery = z.infer<typeof lowStockQuerySchema>['query'];
 
 export const listProductsSchema = z.object({
   query: z.object({

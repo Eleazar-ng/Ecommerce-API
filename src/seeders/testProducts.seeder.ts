@@ -22,7 +22,7 @@ async function seedTestProducts(): Promise<void> {
       priceCents: 8999, // $89.99
       stock: 15,
       categoryId: category._id,
-      images: ['https://res.cloudinary.com/demo/image/upload/sample.jpg'],
+      images: [{ url: 'https://res.cloudinary.com/demo/image/upload/sample.jpg', publicId: 'sample' }],
       tags: ['trail', 'running', 'outdoor'],
       isActive: true,
     },

@@ -1,5 +1,5 @@
 import { Product, Category } from '../models/index.js';
-import type { IProduct } from '../models/index.js';
+import type { IProduct, IProductImage } from '../models/index.js';
 import { NotFoundError } from '../utils/appError.js';
 import { generateUniqueSlug } from '../utils/slug.js';
 
@@ -90,7 +90,7 @@ interface CreateProductParams {
   priceCents: number;
   stock?: number;
   categoryId: string;
-  images?: string[];
+  images?: IProductImage[];
   tags?: string[];
 }
 
@@ -110,7 +110,7 @@ interface UpdateProductParams {
   description?: string;
   priceCents?: number;
   categoryId?: string;
-  images?: string[];
+  images?: IProductImage[];
   tags?: string[];
   isActive?: boolean;
 }
@@ -147,6 +147,13 @@ export async function updateStock(id: string | any, stock: number) {
     throw new NotFoundError('Product not found');
   }
   return product;
+}
+
+// Surfaces products needing restock — sorted lowest-stock-first so the most urgent items
+// are at the top. Only ever considers active products; a deactivated product's stock isn't
+// operationally relevant.
+export async function listLowStockProducts(threshold: number) {
+  return Product.find({ isActive: true, stock: { $lte: threshold } }).sort({ stock: 1 });
 }
 
 // Soft delete only — never a hard delete. Existing Orders snapshot productId as a
