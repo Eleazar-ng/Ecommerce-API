@@ -1,5 +1,15 @@
 import mongoose, { Schema, type HydratedDocument, type Types } from 'mongoose';
 
+// publicId is what Cloudinary's API actually needs to delete an asset later — the url
+// alone isn't reliably reversible back into a publicId. Storing both from the start (set
+// once Stage 9's signed-upload flow exists) avoids that gap. See
+// docs/deferred-decisions.md (Stage 7 review question about how uploads associate with
+// products) for the full reasoning behind this change.
+export interface IProductImage {
+  url: string;
+  publicId: string;
+}
+
 export interface IProduct {
   name: string;
   slug: string;
@@ -7,7 +17,7 @@ export interface IProduct {
   priceCents: number;
   stock: number;
   categoryId: Types.ObjectId;
-  images: string[];
+  images: IProductImage[];
   tags: string[];
   isActive: boolean;
   createdAt: Date;
@@ -15,6 +25,14 @@ export interface IProduct {
 }
 
 export type ProductDocument = HydratedDocument<IProduct>;
+
+const productImageSchema = new Schema<IProductImage>(
+  {
+    url: { type: String, required: true },
+    publicId: { type: String, required: true },
+  },
+  { _id: false } // images don't need their own _id — always accessed as part of the product
+);
 
 const productSchema = new Schema<IProduct>(
   {
@@ -52,11 +70,10 @@ const productSchema = new Schema<IProduct>(
       ref: 'Category',
       required: true,
     },
-    images: [
-      {
-        type: String, // Cloudinary URLs
-      },
-    ],
+    images: {
+      type: [productImageSchema],
+      default: [],
+    },
     // Free-form labels for filtering/search, distinct from Category — a product has exactly
     // one category but can carry many tags.
     tags: {

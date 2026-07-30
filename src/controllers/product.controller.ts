@@ -1,6 +1,7 @@
 import * as productService from '../services/product.service.js';
+import * as uploadService from '../services/upload.service.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
-import type { ListProductsQuery } from '../validations/product.validation.js';
+import type { ListProductsQuery, LowStockQuery } from '../validations/product.validation.js';
 
 function isAdminRole(role?: string): boolean {
   return role === 'admin' || role === 'super_admin';
@@ -57,4 +58,15 @@ export const updateStock = asyncHandler(async (req, res) => {
 export const deleteProduct = asyncHandler(async (req, res) => {
   await productService.deleteProduct(req.params.id);
   res.status(200).json({ success: true, message: 'Product deactivated' });
+});
+
+export const listLowStockProducts = asyncHandler(async (req, res) => {
+  const query = req.query as unknown as LowStockQuery;
+  const products = await productService.listLowStockProducts(query.threshold);
+  res.status(200).json({ success: true, data: products });
+});
+ 
+export const getUploadSignature = asyncHandler(async (req, res) => {
+  const result = uploadService.generateProductImageUploadSignature();
+  res.status(200).json({ success: true, data: result });
 });
