@@ -3,9 +3,11 @@ import helmet from 'helmet';
 import cors from 'cors';
 import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
+import mongoSanitize from 'express-mongo-sanitize';
 import { env } from './config/env.js';
 import routes from './routes/index.js';
 import webhookRoutes from "./routes/webhook.route.js";
+import { globalLimiter } from './middleware/rateLimit.js';
 import { errorHandler, notFound } from './middleware/errorHandler.js';
 
 const app = express();
@@ -44,16 +46,26 @@ app.use((req, res, next) => {
 // NOTE: the Stripe webhook route (built in Stage 6) MUST receive the raw request body to
 // verify the signature — it needs to be mounted with express.raw() BEFORE this express.json()
 // middleware runs, or signature verification will fail.
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '10kb' }));
+app.use(express.urlencoded({ extended: true, limit: '10kb' }));
 app.use(cookieParser());
+
+// Strips any request key starting with '$' or containing '.' from body/params/query —
+// defense-in-depth against NoSQL operator injection (e.g. a client sending
+// { "email": { "$gt": "" } } instead of a plain string to bypass query logic). In practice,
+// Zod already blocks this for every validated field in this codebase (z.string() rejects a
+// plain object outright, and validate() overwrites req.body/query/params with the parsed,
+// type-safe result before a controller ever sees it) — this is a deliberate belt-and-braces
+// layer in case a future endpoint is ever added without validate() wired up correctly, not
+// a fix for a found vulnerability.
+app.use(mongoSanitize());
 
 if (env.NODE_ENV !== 'test') {
   app.use(morgan(env.NODE_ENV === 'development' ? 'dev' : 'combined'));
 }
 
 // --- Routes ---
-app.use('/api/v1', routes);
+app.use('/api/v1', globalLimiter, routes);
 
 // --- Error handling (must be last) ---
 app.use(notFound);

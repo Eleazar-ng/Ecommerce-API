@@ -9,6 +9,7 @@ export enum ErrorCode {
   NOT_FOUND = 'NOT_FOUND',
   CONFLICT = 'CONFLICT',
   BAD_REQUEST = 'BAD_REQUEST',
+  RATE_LIMITED = 'RATE_LIMITED',
   INTERNAL_ERROR = 'INTERNAL_ERROR',
 }
 
@@ -87,5 +88,14 @@ export class ConflictError extends AppError {
 export class BadRequestError extends AppError {
   constructor(message = 'Bad request') {
     super(message, 400, ErrorCode.BAD_REQUEST);
+  }
+}
+
+// 429 — the caller has exceeded a rate limit. Routed through this class (rather than
+// express-rate-limit's own default response) so a 429 has the exact same
+// { success, error: { code, message } } envelope as every other error in this API.
+export class RateLimitError extends AppError {
+  constructor(message = 'Too many requests. Please try again later.') {
+    super(message, 429, ErrorCode.RATE_LIMITED);
   }
 }
