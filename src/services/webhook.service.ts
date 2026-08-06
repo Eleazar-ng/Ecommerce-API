@@ -52,23 +52,14 @@ async function handlePaymentSucceeded(event: Stripe.Event): Promise<void> {
     return; // acknowledge — retrying won't add metadata that was never there
   }
 
-  try {
-    await Transaction.create({
-      userId,
-      orderId,
-      type: 'payment',
-      status: 'succeeded',
-      amountCents: intent.amount,
-      currency: intent.currency,
-      stripePaymentIntentId: intent.id,
-      stripeEventId: event.id,
-    });
-  } catch (err) {
-    if (isDuplicateEventError(err)) {
-      console.log(`Duplicate webhook event ${event.id} — already processed, skipping`);
-      return;
-    }
-    throw err;
+  // Cheap pre-check BEFORE opening a transaction: if this exact event was already fully
+  // processed, the Transaction row only exists because the WHOLE sequence committed
+  // together (see above) — so finding it here means it's safe to no-op without redoing
+  // anything. Avoids the overhead of a transaction for the common redelivery case.
+  const alreadyProcessed = await Transaction.exists({ stripeEventId: event.id });
+  if (alreadyProcessed) {
+    console.log(`Duplicate webhook event ${event.id} — already processed, skipping`);
+    return;
   }
 
   const order = await Order.findById(orderId);
@@ -77,35 +68,65 @@ async function handlePaymentSucceeded(event: Stripe.Event): Promise<void> {
     return;
   }
 
-  // Only writer of Order.status after creation — see docs/deferred-decisions.md.
-  order.status = 'paid';
-  await order.save();
-
-  // Stock becomes "real" here. Stage 5 only soft-checked (no decrement); checkout
-  // hard-checked but still didn't decrement (to avoid double-counting against an
-  // abandoned/failed payment). This is the actual, final decrement.
-  //
-  // Guarded with stock >= quantity so it can never go negative in the DB. If that guard
-  // fails (a genuine race between two simultaneous successful checkouts for the last unit),
-  // the order still stands — the customer already paid — but it's logged loudly as an
-  // oversold condition for manual reconciliation rather than silently corrupting inventory.
-  for (const item of order.items) {
-    const result = await Product.updateOne(
-      { _id: item.productId, stock: { $gte: item.quantity } },
-      { $inc: { stock: -item.quantity } }
-    );
-    if (result.matchedCount === 0) {
-      console.error(
-        `OVERSOLD: order ${order._id.toString()} item ${item.productId.toString()} — ` +
-          `stock insufficient or product missing at fulfillment time. Needs manual reconciliation.`
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => { 
+      await Transaction.create(
+        [
+          {
+            userId,
+            orderId,
+            type: 'payment',
+            status: 'succeeded',
+            amountCents: intent.amount,
+            currency: intent.currency,
+            stripePaymentIntentId: intent.id,
+            stripeEventId: event.id,
+          }
+        ],{ session }
       );
-    }
-  }
 
-  // Cleared here, not at checkout initiation — consistent with "only the webhook handler
-  // owns post-payment state changes." If checkout cleared the cart immediately, a failed
-  // payment would leave the user with an empty cart and no easy way to retry.
-  await Cart.updateOne({ userId }, { $set: { items: [] } });
+      // Only writer of Order.status after creation — see docs/deferred-decisions.md.
+      order.status = 'paid';
+      await order.save({ session });
+
+      // Stock becomes "real" here. Stage 5 only soft-checked (no decrement); checkout
+      // hard-checked but still didn't decrement (to avoid double-counting against an
+      // abandoned/failed payment). This is the actual, final decrement.
+      //
+      // Guarded with stock >= quantity so it can never go negative in the DB. If that guard
+      // fails (a genuine race between two simultaneous successful checkouts for the last unit),
+      // the order still stands — the customer already paid — but it's logged loudly as an
+      // oversold condition for manual reconciliation rather than silently corrupting inventory.
+      for (const item of order.items) {
+        const result = await Product.updateOne(
+          { _id: item.productId, stock: { $gte: item.quantity } },
+          { $inc: { stock: -item.quantity } },
+          { session }
+        );
+        if (result.matchedCount === 0) {
+          console.error(
+            `OVERSOLD: order ${order._id.toString()} item ${item.productId.toString()} — ` +
+              `stock insufficient or product missing at fulfillment time. Needs manual reconciliation.`
+          );
+        }
+      }
+
+      // Cleared here, not at checkout initiation — consistent with "only the webhook handler
+      // owns post-payment state changes." If checkout cleared the cart immediately, a failed
+      // payment would leave the user with an empty cart and no easy way to retry.
+      await Cart.updateOne({ userId }, { $set: { items: [] } }, { session });
+    });
+
+  } catch (err) {
+    if (isDuplicateEventError(err)) {
+      console.log(`Duplicate webhook event ${event.id} — already processed, skipping`);
+      return;
+    }
+    throw err;
+  } finally {
+    await session.endSession();
+  }
 }
 
 async function handlePaymentFailed(event: Stripe.Event): Promise<void> {
@@ -118,25 +139,44 @@ async function handlePaymentFailed(event: Stripe.Event): Promise<void> {
     return;
   }
 
-  try {
-    await Transaction.create({
-      userId,
-      orderId,
-      type: 'payment',
-      status: 'failed',
-      amountCents: intent.amount,
-      currency: intent.currency,
-      stripePaymentIntentId: intent.id,
-      stripeEventId: event.id,
-    });
-  } catch (err) {
-    if (isDuplicateEventError(err)) return;
-    throw err;
+  const alreadyProcessed = await Transaction.exists({ stripeEventId: event.id });
+  if (alreadyProcessed) {
+    console.log(`Duplicate webhook event ${event.id} — already processed, skipping`);
+    return;
   }
 
-  await Order.findByIdAndUpdate(orderId, { status: 'failed' });
-  // Deliberately NOT touching cart or stock — the user should be able to fix their payment
-  // method and retry checkout without losing what was in their cart.
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      await Transaction.create(
+        [
+          {
+            userId,
+            orderId,
+            type: 'payment',
+            status: 'failed',
+            amountCents: intent.amount,
+            currency: intent.currency,
+            stripePaymentIntentId: intent.id,
+            stripeEventId: event.id,
+          },
+        ],
+        { session }
+      );
+
+      await Order.findByIdAndUpdate(orderId, { status: 'failed' }, { session });
+      // Deliberately NOT touching cart or stock — the user should be able to fix their payment
+      // method and retry checkout without losing what was in their cart.
+    });
+  } catch (err) {
+    if (isDuplicateEventError(err)) {
+      console.log(`Duplicate webhook event ${event.id} (race) — already processed, skipping`);
+      return;
+    }
+    throw err;
+  } finally {
+    await session.endSession();
+  }
 }
 
 // Completes the refund flow initiated by admin-order.service.ts's initiateRefund(). That
@@ -151,6 +191,12 @@ async function handleChargeRefunded(event: Stripe.Event): Promise<void> {
     console.error(`charge.refunded (${charge.id}) missing payment_intent reference`);
     return;
   }
+
+  const alreadyProcessed = await Transaction.exists({ stripeEventId: event.id });
+  if (alreadyProcessed) {
+    console.log(`Duplicate webhook event ${event.id} — already processed, skipping`);
+    return;
+  }
  
   // Unlike the payment success/failure handlers, there's no metadata round-trip needed
   // here — Order already stores stripePaymentIntentId (set at checkout), so the order can
@@ -161,31 +207,42 @@ async function handleChargeRefunded(event: Stripe.Event): Promise<void> {
     return;
   }
  
+  const session = await mongoose.startSession();
   try {
-    await Transaction.create({
-      userId: order.userId,
-      orderId: order._id,
-      type: 'refund',
-      status: 'succeeded',
-      amountCents: charge.amount_refunded,
-      currency: charge.currency,
-      stripePaymentIntentId: paymentIntentId,
-      stripeEventId: event.id,
-    });
+    await session.withTransaction(async () => {
+      await Transaction.create(
+        [
+          {
+            userId: order.userId,
+            orderId: order._id,
+            type: 'refund',
+            status: 'succeeded',
+            amountCents: charge.amount_refunded,
+            currency: charge.currency,
+            stripePaymentIntentId: paymentIntentId,
+            stripeEventId: event.id,
+          },
+        ],
+        {session}
+      );
+
+      // Deliberately NOT restocking inventory automatically — whether a returned/refunded item
+      // goes back into sellable stock is a manual, often inspection-dependent decision in real
+      // retail operations (was the item actually returned? is it resellable?), not something
+      // safe to automate from a webhook alone.
+      order.status = 'refunded';
+      await order.save({ session });
+    })
+
   } catch (err) {
     if (isDuplicateEventError(err)) {
       console.log(`Duplicate webhook event ${event.id} — already processed, skipping`);
       return;
     }
     throw err;
+  } finally {
+    await session.endSession();
   }
- 
-  // Deliberately NOT restocking inventory automatically — whether a returned/refunded item
-  // goes back into sellable stock is a manual, often inspection-dependent decision in real
-  // retail operations (was the item actually returned? is it resellable?), not something
-  // safe to automate from a webhook alone.
-  order.status = 'refunded';
-  await order.save();
 }
  
  
