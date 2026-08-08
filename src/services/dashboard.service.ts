@@ -1,5 +1,5 @@
 import { Product, Order } from '../models/index.js';
-import type { OrderDocument } from '../models/index.js';
+import type { IOrder } from '../models/index.js';
 
 const DEFAULT_LOW_STOCK_THRESHOLD = 5;
 
@@ -9,7 +9,7 @@ interface DashboardSummary {
   lowStockThreshold: number;
   totalOrders: number;
   totalRevenueCents: number;
-  recentOrders: OrderDocument[];
+  recentOrders: IOrder[];
 }
 
 export async function getDashboardSummary(
@@ -27,7 +27,7 @@ export async function getDashboardSummary(
       { $match: { status: { $in: ['paid', 'shipped', 'delivered'] } } },
       { $group: { _id: null, total: { $sum: '$totalCents' } } },
     ]),
-    Order.find().sort({ createdAt: -1 }).limit(5),
+    Order.find().sort({ createdAt: -1 }).limit(5).lean(),
   ]);
 
   return {

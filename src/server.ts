@@ -19,19 +19,33 @@ async function start(): Promise<void> {
 async function shutdown(signal: string): Promise<void> {
   console.log(`\n${signal} received. Shutting down gracefully...`);
 
-  if (server) {
-    server.close(async () => {
-      console.log('HTTP server closed');
-      await disconnectDB();
-      process.exit(0);
-    });
-  } else {
+  if (!server) {
     process.exit(0);
+    return;
   }
+
+  // server.close() stops accepting NEW connections but, by default, waits for ALL open
+  // sockets to end — including idle keep-alive connections that aren't actively processing
+  // a request. Those can sit open for a long time (up to the keep-alive timeout), which
+  // would otherwise stall shutdown for no good reason. closeIdleConnections() (Node 18.2+)
+  // proactively closes those immediately, while leaving connections that ARE actively
+  // processing a request (e.g. a webhook mid-flight) alone to finish normally.
+  server.closeIdleConnections();
+
+  server.close(async () => {
+    console.log('HTTP server closed');
+    await disconnectDB();
+    process.exit(0);
+  });
+
 
   // Force-exit if shutdown hangs longer than 10s
   setTimeout(() => {
     console.error('Forced shutdown after timeout');
+    // closeAllConnections() (Node 18.2+) forcibly ends any connections still open,
+    // including ones mid-request, so the process can actually exit rather than hang
+    // waiting on a socket that server.close()'s callback is still watching.
+    server?.closeAllConnections();
     process.exit(1);
   }, 10_000).unref();
 }

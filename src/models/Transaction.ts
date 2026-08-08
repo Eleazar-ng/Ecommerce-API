@@ -90,5 +90,9 @@ const transactionSchema = new Schema<ITransaction>(
 
 transactionSchema.index({ userId: 1, createdAt: -1 }); // supports the payment-history endpoint
 transactionSchema.index({ orderId: 1 });
+// Stage 12: added once Stage 8's admin transaction listing (filter by status or type,
+// sorted by createdAt) was actually built.
+transactionSchema.index({ status: 1, createdAt: -1 });
+transactionSchema.index({ type: 1, createdAt: -1 });
 
 export default mongoose.model<ITransaction>('Transaction', transactionSchema);
