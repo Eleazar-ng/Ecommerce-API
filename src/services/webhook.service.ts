@@ -42,6 +42,23 @@ function isDuplicateEventError(err: unknown): boolean {
   return err instanceof mongoose.mongo.MongoServerError && err.code === 11000;
 }
 
+// --- Stage 11: every multi-write handler below runs inside a MongoDB transaction. ---
+// Previously, each handler did its writes as separate, independent operations (Transaction
+// insert, then Order update, then stock decrements, then cart clear). If the process was
+// killed between any two of those steps — a hard SIGKILL after the graceful-shutdown
+// timeout, a crash, a hosting platform yanking the process — the result was a half-applied
+// webhook: e.g. a Transaction row existing but Order.status still stuck on 'pending'
+// forever, because a Stripe redelivery of the same event would hit the stripeEventId
+// idempotency guard and silently no-op, never retrying the work that never finished.
+//
+// Wrapping each handler's full write sequence in a session.withTransaction() call fixes
+// this at the root: either EVERY write in the sequence commits, or NONE of them do. A
+// process killed mid-transaction just means MongoDB rolls back the uncommitted transaction
+// automatically — so a Stripe redelivery finds no Transaction row yet (since it was never
+// committed) and correctly redoes the entire sequence from scratch. This requires MongoDB
+// running as a replica set (even single-node) — transactions aren't supported against a
+// standalone mongod. See docs/deferred-decisions.md for local setup steps.
+
 async function handlePaymentSucceeded(event: Stripe.Event): Promise<void> {
   const intent = event.data.object as Stripe.PaymentIntent;
   const orderId = intent.metadata.orderId;
@@ -98,16 +115,31 @@ async function handlePaymentSucceeded(event: Stripe.Event): Promise<void> {
       // fails (a genuine race between two simultaneous successful checkouts for the last unit),
       // the order still stands — the customer already paid — but it's logged loudly as an
       // oversold condition for manual reconciliation rather than silently corrupting inventory.
-      for (const item of order.items) {
-        const result = await Product.updateOne(
-          { _id: item.productId, stock: { $gte: item.quantity } },
-          { $inc: { stock: -item.quantity } },
-          { session }
-        );
-        if (result.matchedCount === 0) {
+      //
+      // Stage 12: batched into a single bulkWrite() instead of N sequential updateOne()
+      // calls (one per line item) — an order with, say, 5 different products previously
+      // meant 5 separate network round-trips to MongoDB inside this transaction; now it's
+      // one. Each op still carries its own stock >= quantity guard, so it can never go
+      // negative in the DB. If any individual op's guard fails (a genuine race between two
+      // simultaneous successful checkouts for the last unit), the order still stands — the
+      // customer already paid — but it's logged loudly as an oversold condition for manual
+      // reconciliation rather than silently corrupting inventory. This oversell guard is
+      // independent of the transaction: it's a legitimate business conflict, not a failure
+      // to roll back.
+     if (order.items.length > 0) {
+        const stockDecrementOps = order.items.map((item) => ({
+          updateOne: {
+            filter: { _id: item.productId, stock: { $gte: item.quantity } },
+            update: { $inc: { stock: -item.quantity } },
+          },
+        }));
+ 
+        const bulkResult = await Product.bulkWrite(stockDecrementOps, { session });
+        if (bulkResult.matchedCount < order.items.length) {
           console.error(
-            `OVERSOLD: order ${order._id.toString()} item ${item.productId.toString()} — ` +
-              `stock insufficient or product missing at fulfillment time. Needs manual reconciliation.`
+            `OVERSOLD: order ${order._id.toString()} — ${order.items.length - bulkResult.matchedCount} ` +
+              `item(s) could not be decremented (insufficient stock or missing product). ` +
+              `Needs manual reconciliation.`
           );
         }
       }
@@ -119,6 +151,11 @@ async function handlePaymentSucceeded(event: Stripe.Event): Promise<void> {
     });
 
   } catch (err) {
+       // Rare race: two redeliveries of the same event both passed the pre-check before
+    // either committed. Only one wins the unique index inside its transaction; the other
+    // gets a duplicate-key error, which MongoDB automatically rolls back cleanly (no
+    // partial writes, since it's transactional). Treat that as an idempotent no-op, not a
+    // real failure — the other execution already committed the real work.
     if (isDuplicateEventError(err)) {
       console.log(`Duplicate webhook event ${event.id} — already processed, skipping`);
       return;

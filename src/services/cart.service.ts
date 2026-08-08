@@ -35,13 +35,15 @@ interface CartView {
 
 // Cart.items.productId is a live reference (see Cart.ts) — populate() pulls in current
 // product data on every read, which is exactly why cart items don't snapshot price/name.
+// .lean() applied — this function only reads the populated data to build a transformed
+// CartView; it never calls .save() on the cart or any populated product.
 async function toCartView(userId: Types.ObjectId | string): Promise<CartView> {
   const cart = await Cart.findOne({ userId }).populate<{
     items: { productId: IProduct & { _id: Types.ObjectId }; quantity: number }[];
   }>({
     path: 'items.productId',
     select: 'name priceCents images stock isActive',
-  });
+  }).lean();
 
   const items: CartItemView[] = (cart?.items ?? []).map((item:any) => {
     const product = item.productId; // populated document, or could be null if hard-deleted
@@ -54,7 +56,7 @@ async function toCartView(userId: Types.ObjectId | string): Promise<CartView> {
       productId: exists ? product._id.toString() : String(item.productId),
       name: exists ? product.name : 'Product no longer available',
       priceCents: exists ? product.priceCents : 0,
-      image: exists ? (product.images[0] ?? null) : null,
+      image: exists ? (product.images[0]?.url ?? null) : null,
       quantity: item.quantity,
       stock: exists ? product.stock : 0,
       available,

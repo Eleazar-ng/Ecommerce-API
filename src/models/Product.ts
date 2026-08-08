@@ -98,5 +98,13 @@ productSchema.index(
   { weights: { name: 5, tags: 3, description: 1 } }
 );
 productSchema.index({ categoryId: 1 });
+// Stage 12: default GET /products (no search term) filters isActive and sorts by
+// createdAt — without this compound index, that's a collection scan + in-memory sort on
+// every plain "browse products" request, which is the single most common query this API
+// will see.
+productSchema.index({ isActive: 1, createdAt: -1 });
+// Supports GET /products/low-stock (Stage 8): filters isActive + stock<=threshold, sorted
+// by stock ascending.
+productSchema.index({ isActive: 1, stock: 1 });
 
 export default mongoose.model<IProduct>('Product', productSchema);

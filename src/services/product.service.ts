@@ -23,7 +23,14 @@ interface PaginatedResult<T> {
   totalPages: number;
 }
 
-export async function listProducts(params: ListProductsParams | any): Promise<PaginatedResult<IProduct>> {
+// Stage 12: .lean() applied here — this function's result is only ever serialized to JSON
+// and returned to the client, never mutated or .save()'d, so there's no reason to pay for
+// Mongoose's full document hydration (change tracking, virtuals, instance methods).
+// Also trims `description` from list results (Product.select) — a product listing shows
+// name/price/image/tags, not the full description; that only needs to load on the single
+// GET /products/:id view. Meaningfully smaller payloads on the highest-traffic read path
+// this API has.
+export async function listProducts(params: ListProductsParams | any): Promise<PaginatedResult<Omit<IProduct, 'description'>>> {
   const { search, category, minPrice, maxPrice, tags, page, limit, includeInactive, isAdmin } = params;
 
   const filter: Record<string, unknown> = {};
@@ -54,24 +61,26 @@ export async function listProducts(params: ListProductsParams | any): Promise<Pa
 
   const skip = (page - 1) * limit;
 
-  // When searching, sort by text relevance (Mongoose's $meta projection isn't cleanly
-  // typed against a specific document interface, hence the narrow `as any` here — the
-  // extra `score` field it adds isn't part of IProduct and nothing downstream reads it).
+  // `as any` on the projection/sort objects: Mongoose's $meta projection isn't cleanly
+  // typed against a specific document interface, and mixing it with a real-field exclusion
+  // (`description: 0`) compounds that. The runtime behavior is standard, well-documented
+  // MongoDB projection syntax — this is a typing gap in Mongoose, not a risk in the query
+  // itself.
   let query = Product.find(filter);
   if (search) {
     query = query
-      .select({ score: { $meta: 'textScore' } } as any)
+      .select({ score: { $meta: 'textScore' }, description: 0 } as any)
       .sort({ score: { $meta: 'textScore' } } as any);
   } else {
-    query = query.sort({ createdAt: -1 });
+    query = query.select('-description').sort({ createdAt: -1 });
   }
 
   const [items, total] = await Promise.all([
-    query.skip(skip).limit(limit),
+    query.skip(skip).limit(limit).lean(),
     Product.countDocuments(filter),
   ]);
 
-  return { items, page, limit, total, totalPages: Math.ceil(total / limit) };
+  return { items: items as Omit<IProduct, 'description'>[], page, limit, total, totalPages: Math.ceil(total / limit) };
 }
 
 export async function getProductById(id: string | any, isAdmin: boolean) {
@@ -153,7 +162,7 @@ export async function updateStock(id: string | any, stock: number) {
 // are at the top. Only ever considers active products; a deactivated product's stock isn't
 // operationally relevant.
 export async function listLowStockProducts(threshold: number) {
-  return Product.find({ isActive: true, stock: { $lte: threshold } }).sort({ stock: 1 });
+  return Product.find({ isActive: true, stock: { $lte: threshold } }).sort({ stock: 1 }).lean();
 }
 
 // Soft delete only — never a hard delete. Existing Orders snapshot productId as a

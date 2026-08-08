@@ -106,5 +106,9 @@ const orderSchema = new Schema<IOrder>(
 );
 
 orderSchema.index({ userId: 1, createdAt: -1 }); // supports "my orders, most recent first"
+// Stage 12: added once Stage 8's admin order listing (filter by status, sorted by
+// createdAt) was actually built — without this, GET /orders/all?status=paid would need a
+// full collection scan to filter, then sort in memory.
+orderSchema.index({ status: 1, createdAt: -1 });
 
 export default mongoose.model<IOrder>('Order', orderSchema);
