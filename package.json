@@ -9,9 +9,11 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "npm run build && node dist/server.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "seed:super-admin": "tsx src/seeders/superAdmin.seeder.ts",
     "seed:test-products": "tsx src/seeders/testProducts.seeder.ts"
   },
@@ -20,13 +22,15 @@
     "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
+    "@types/express-mongo-sanitize": "^1.3.2",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/morgan": "^1.9.10",
     "@types/node": "^26.1.1",
+    "@types/supertest": "^7.2.1",
+    "nodemon": "^3.1.14",
     "tsx": "^4.23.0"
   },
   "dependencies": {
-    "@types/express-mongo-sanitize": "^1.3.2",
     "bcrypt": "^6.0.0",
     "cloudinary": "^2.10.0",
     "cookie-parser": "^1.4.7",
@@ -38,9 +42,12 @@
     "google-auth-library": "^10.9.0",
     "helmet": "^8.2.0",
     "jsonwebtoken": "^9.0.3",
+    "mongodb-memory-server": "^11.2.0",
     "mongoose": "^9.7.4",
     "morgan": "^1.11.0",
     "stripe": "^22.3.2",
+    "supertest": "^7.2.2",
+    "vitest": "^4.1.10",
     "zod": "^4.4.3"
   }
 }
