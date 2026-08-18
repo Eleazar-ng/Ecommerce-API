@@ -27,6 +27,9 @@ const envSchema = z.object({
   CLIENT_URL: z.string().default('http://localhost:3000'),
 
   GOOGLE_CLIENT_ID: z.string().min(1, 'GOOGLE_CLIENT_ID is required'),
+
+  RESEND_API_KEY: z.string().min(1, 'RESEND_API_KEY is required'),
+  RESEND_FROM_EMAIL: z.string().min(1, 'RESEND_FROM_EMAIL is required'),
 });
 
 export type Env = z.infer<typeof envSchema>;
