@@ -1,6 +1,6 @@
 import User from '../models/User.js';
 import { UserDocument } from '../models/User.js';
-import { AppError } from '../utils/appError.js';
+import { ConflictError, UnauthorizedError, ForbiddenError, BadRequestError } from '../utils/appError.js';
 import { hashPassword, comparePassword, generateSecureToken, hashToken } from '../utils/hash.js';
 import { signAccessToken, signRefreshToken, verifyRefreshToken } from '../utils/token.js';
 import { verifyGoogleIdToken } from '../config/google.js';
@@ -52,10 +52,10 @@ async function issueTokenPair(user: UserDocument): Promise<TokenPair> {
 
 function assertLoginAllowed(user: UserDocument): void {
   if (user.isSuspended) {
-    throw new AppError('This account has been suspended', 403);
+    throw new ForbiddenError('This account has been suspended');
   }
   if (user.accountStatus === 'pending') {
-    throw new AppError('Account setup is not complete. Check your invite email.', 403);
+    throw new ForbiddenError('Account setup is not complete. Check your invite email.');
   }
 }
 
@@ -74,7 +74,7 @@ export async function signup({ email, username, password, firstName, lastName }:
   const existing = await User.findOne({ $or: [{ email }, { username }] });
   if (existing) {
     const field = existing.email === email ? 'email' : 'username';
-    throw new AppError(`This ${field} is already registered`, 409);
+    throw new ConflictError(`This ${field} is already registered`);
   }
 
   const passwordHash = await hashPassword(password);
@@ -112,14 +112,14 @@ export async function login({ identifier, password }: LoginParams) {
     // Same generic message whether the user doesn't exist or signed up via Google —
     // confirming "this email uses Google sign-in" to an unauthenticated caller is itself
     // a minor information leak.
-    throw new AppError('Invalid credentials', 401);
+    throw new UnauthorizedError('Invalid credentials');
   }
 
   assertLoginAllowed(user);
 
   const valid = await comparePassword(password, user.passwordHash);
   if (!valid) {
-    throw new AppError('Invalid credentials', 401);
+    throw new UnauthorizedError('Invalid credentials');
   }
 
   const tokens = await issueTokenPair(user);
@@ -174,12 +174,12 @@ export async function refreshTokens(presentedRefreshToken: string) {
   try {
     decoded = verifyRefreshToken(presentedRefreshToken);
   } catch {
-    throw new AppError('Invalid or expired refresh token', 401);
+    throw new UnauthorizedError('Invalid or expired refresh token');
   }
 
   const user = await User.findById(decoded.sub).select('+refreshTokenHash');
   if (!user) {
-    throw new AppError('Invalid or expired refresh token', 401);
+    throw new UnauthorizedError('Invalid or expired refresh token');
   }
 
   const presentedHash = hashToken(presentedRefreshToken);
@@ -190,7 +190,7 @@ export async function refreshTokens(presentedRefreshToken: string) {
     // token being replayed. Nuke the session entirely rather than silently issuing new
     // tokens, forcing a fresh login.
     await User.findByIdAndUpdate(user._id, { $unset: { refreshTokenHash: 1 } });
-    throw new AppError('Session invalidated. Please log in again.', 401);
+    throw new UnauthorizedError('Session invalidated. Please log in again.');
   }
 
   assertLoginAllowed(user);
@@ -222,7 +222,7 @@ export async function resetPassword(rawToken: string | any, newPassword: string)
   }).select('+passwordResetTokenHash +passwordResetExpires');
 
   if (!user) {
-    throw new AppError('Invalid or expired reset token', 400);
+    throw new BadRequestError('Invalid or expired reset token');
   }
 
   user.passwordHash = await hashPassword(newPassword);
@@ -234,6 +234,28 @@ export async function resetPassword(rawToken: string | any, newPassword: string)
   await user.save();
 }
 
+// --- Resend verification email ---
+// The only way to get a verification token was at signup, with a 24h expiry. Without this,
+// anyone whose link expired (or who lost the email) would be permanently stuck unverified —
+// which, as of Stage 6, also means permanently blocked from checkout. Takes the full user
+// document (from req.user, already fetched by `protect`) rather than an id, same reasoning
+// as checkout.service.ts — avoids a redundant lookup.
+export async function resendVerificationEmail(user: UserDocument): Promise<void> {
+  if (user.isEmailVerified) {
+    throw new BadRequestError('This email is already verified');
+  }
+ 
+  // Overwriting the hash/expiry naturally invalidates any previous unexpired link too —
+  // if someone had two verification emails in their inbox, only the newest one would work
+  // after this. That's intentional: a single active token per user is simpler to reason
+  // about than tracking multiple valid tokens.
+  const { raw } = generateSecureToken();
+  user.emailVerificationTokenHash = hashToken(raw);
+  user.emailVerificationExpires = new Date(Date.now() + VERIFY_TOKEN_TTL_MS);
+  await user.save();
+  await sendVerificationEmail(user.email, raw);
+}
+
 // --- Email verification ---
 export async function verifyEmail(rawToken: string | any): Promise<void> {
   const tokenHash = hashToken(rawToken);
@@ -243,7 +265,7 @@ export async function verifyEmail(rawToken: string | any): Promise<void> {
   }).select('+emailVerificationTokenHash +emailVerificationExpires');
 
   if (!user) {
-    throw new AppError('Invalid or expired verification link', 400);
+    throw new BadRequestError('Invalid or expired verification link');
   }
 
   user.isEmailVerified = true;
@@ -261,7 +283,7 @@ export async function completeAdminSetup(rawToken: string | any, password: strin
   }).select('+adminSetupTokenHash +adminSetupExpires');
 
   if (!user) {
-    throw new AppError('Invalid or expired invite link', 400);
+    throw new BadRequestError('Invalid or expired invite link');
   }
 
   user.passwordHash = await hashPassword(password);
