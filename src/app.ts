@@ -7,6 +7,7 @@ import mongoSanitize from 'express-mongo-sanitize';
 import { env } from './config/env.js';
 import routes from './routes/index.js';
 import webhookRoutes from "./routes/webhook.route.js";
+import docsRoutes from './routes/docs.routes.js';
 import { globalLimiter } from './middleware/rateLimit.js';
 import { errorHandler, notFound } from './middleware/errorHandler.js';
 
@@ -66,6 +67,11 @@ if (env.NODE_ENV !== 'test') {
 
 // --- Routes ---
 app.use('/api/v1', globalLimiter, routes);
+
+// Mounted OUTSIDE /api/v1 deliberately — API documentation is meta-content about the API,
+// not a versioned API resource itself, so it's exempt from globalLimiter too (appropriate
+// for a docs page nobody should ever need to rate-limit).
+app.use('/docs', docsRoutes);
 
 // --- Error handling (must be last) ---
 app.use(notFound);
