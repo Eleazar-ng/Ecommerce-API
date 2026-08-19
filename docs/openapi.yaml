@@ -1,0 +1,1291 @@
+openapi: 3.0.3
+info:
+  title: E-commerce API
+  version: "1.0.0"
+  description: |
+    A backend-only e-commerce API: JWT + Google auth, an admin-invite-only RBAC system,
+    cart, Stripe checkout with idempotent webhook processing, product/category CRUD,
+    Cloudinary image uploads via signed direct upload, an admin panel with refunds, and
+    rate limiting / NoSQL-injection defenses.
+
+    ## Response envelope
+    Every endpoint returns one of two shapes:
+    - Success: `{ "success": true, "data": ... }` (list endpoints also include a `meta` object with pagination info)
+    - Error: `{ "success": false, "error": { "code": "...", "message": "...", "details"?: [...] } }`
+
+    ## Auth
+    Send `Authorization: Bearer <accessToken>` on any endpoint marked with the lock icon.
+    Access tokens are short-lived; use `POST /auth/refresh` (relies on an httpOnly cookie
+    set at login, not a header) to get a new one.
+
+    ## Rate limiting
+    A generous global limit (300 requests / 15 min per IP) applies to every endpoint under
+    `/api/v1` except the Stripe webhook (authenticity there comes from signature
+    verification, not rate limiting). Several sensitive endpoints have their own stricter,
+    dedicated limit on top of that baseline — called out with a 429 response on the specific
+    endpoint below: login/google (5 / 15 min, IP-based — deliberately not per-account, since
+    account lockout is itself an abuse vector), signup (10 / hour), forgot-password and
+    resend-verification-email (5 / hour each — same abuse vector, spamming someone's inbox),
+    checkout (10 / 15 min — protects Stripe API quota from a retry storm).
+servers:
+  - url: http://localhost:5000/api/v1
+    description: Local development
+tags:
+  - name: Auth
+  - name: Admin Management
+  - name: Cart
+  - name: Checkout
+  - name: Orders
+  - name: Admin Orders
+  - name: Payment History
+  - name: Products
+  - name: Categories
+  - name: Dashboard
+  - name: Health
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum: [VALIDATION_ERROR, UNAUTHORIZED, FORBIDDEN, NOT_FOUND, CONFLICT, BAD_REQUEST, RATE_LIMITED, INTERNAL_ERROR]
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  message: { type: string }
+
+    PaginationMeta:
+      type: object
+      properties:
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+        totalPages: { type: integer }
+
+    User:
+      type: object
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        username: { type: string }
+        firstName: { type: string }
+        lastName: { type: string }
+        role: { type: string, enum: [user, admin, super_admin] }
+        permissions:
+          type: array
+          items: { type: string, enum: [manage_products, manage_categories, manage_orders, manage_inventory, view_transactions] }
+        isEmailVerified: { type: boolean }
+        authProvider: { type: string, enum: [local, google] }
+
+    AuthTokenPair:
+      type: object
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        accessToken: { type: string }
+
+    ShippingAddress:
+      type: object
+      required: [line1, city, postalCode, country]
+      properties:
+        line1: { type: string }
+        city: { type: string }
+        state: { type: string }
+        postalCode: { type: string }
+        country: { type: string, description: "2-letter country code, e.g. US" }
+
+    ProductImage:
+      type: object
+      required: [url, publicId]
+      properties:
+        url: { type: string, format: uri }
+        publicId: { type: string }
+
+    Product:
+      type: object
+      properties:
+        _id: { type: string }
+        name: { type: string }
+        slug: { type: string }
+        description: { type: string, description: "Omitted from list responses; present on GET /products/:id only" }
+        priceCents: { type: integer, minimum: 0 }
+        stock: { type: integer, minimum: 0 }
+        categoryId: { type: string }
+        images:
+          type: array
+          items: { $ref: '#/components/schemas/ProductImage' }
+        tags:
+          type: array
+          items: { type: string }
+        isActive: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    Category:
+      type: object
+      properties:
+        _id: { type: string }
+        name: { type: string }
+        slug: { type: string }
+        isActive: { type: boolean }
+
+    CartItem:
+      type: object
+      properties:
+        productId: { type: string }
+        name: { type: string }
+        priceCents: { type: integer }
+        image: { type: string, nullable: true }
+        quantity: { type: integer }
+        stock: { type: integer }
+        available:
+          type: boolean
+          description: "false if the product was deactivated or stock dropped below the cart quantity since it was added — item stays visible, just excluded from totals"
+        lineTotalCents: { type: integer }
+
+    Cart:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/CartItem' }
+        itemCount: { type: integer }
+        subtotalCents: { type: integer }
+
+    OrderItem:
+      type: object
+      properties:
+        productId: { type: string }
+        name: { type: string, description: "Snapshotted at purchase time — stays accurate even if the product is later renamed" }
+        priceCents: { type: integer, description: "Snapshotted price at purchase time" }
+        quantity: { type: integer }
+
+    Order:
+      type: object
+      properties:
+        _id: { type: string }
+        userId: { type: string }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/OrderItem' }
+        totalCents: { type: integer }
+        status:
+          type: string
+          enum: [pending, paid, failed, cancelled, refunded, shipped, delivered]
+          description: "pending/paid/failed set only by the Stripe webhook; shipped/delivered set only by an admin; refunded set only by the refund webhook"
+        shippingAddress: { $ref: '#/components/schemas/ShippingAddress' }
+        stripePaymentIntentId: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    Transaction:
+      type: object
+      properties:
+        _id: { type: string }
+        reference: { type: string, description: "Internal human-readable reference, e.g. TXN-20260709-4F8A2C — independent of Stripe's own IDs" }
+        userId: { type: string }
+        orderId: { type: string }
+        type: { type: string, enum: [payment, refund] }
+        status: { type: string, enum: [pending, succeeded, failed] }
+        amountCents: { type: integer }
+        currency: { type: string }
+        stripePaymentIntentId: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    CheckoutResult:
+      type: object
+      properties:
+        orderId: { type: string }
+        clientSecret: { type: string, description: "Pass to Stripe.js on the client to complete payment" }
+        amountCents: { type: integer, description: "Server-computed total — never trusts a client-sent amount" }
+
+    DashboardSummary:
+      type: object
+      properties:
+        totalActiveProducts: { type: integer }
+        lowStockCount: { type: integer }
+        lowStockThreshold: { type: integer }
+        totalOrders: { type: integer }
+        totalRevenueCents:
+          type: integer
+          description: "Sum of totalCents for paid/shipped/delivered orders only — excludes pending/failed/cancelled/refunded entirely"
+        recentOrders:
+          type: array
+          items: { $ref: '#/components/schemas/Order' }
+
+  responses:
+    ValidationError:
+      description: Request failed Zod validation
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: Missing, invalid, or expired access token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: Authenticated, but lacking the required role/permission
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: Request conflicts with current state (duplicate, insufficient stock, invalid transition, etc.)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness check
+      security: []
+      responses:
+        '200':
+          description: Server is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  timestamp: { type: string, format: date-time }
+
+  /auth/signup:
+    post:
+      tags: [Auth]
+      summary: Create a user account
+      description: Always produces role "user", regardless of any role field sent — admins can only be created via invite.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, username, password, firstName, lastName]
+              properties:
+                email: { type: string, format: email }
+                username: { type: string, description: "3-30 chars, letters/numbers/._- only" }
+                password: { type: string, minLength: 8 }
+                firstName: { type: string }
+                lastName: { type: string }
+      responses:
+        '201':
+          description: Account created, auto-logged-in
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data: { $ref: '#/components/schemas/AuthTokenPair' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in with email or username
+      description: Shared endpoint for user/admin/super_admin. Blocked for suspended accounts or admins still in accountStatus "pending".
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [identifier, password]
+              properties:
+                identifier: { type: string, description: "Email or username" }
+                password: { type: string }
+      responses:
+        '200':
+          description: Logged in
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AuthTokenPair' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: "Suspended account or admin setup not yet completed" }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/google:
+    post:
+      tags: [Auth]
+      summary: Sign in or sign up with Google
+      description: Verifies a Google ID token server-side. Auto-links to an existing local account with the same email, or creates a new role:"user" account.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idToken]
+              properties:
+                idToken: { type: string, description: "ID token obtained client-side from Google's own SDK" }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AuthTokenPair' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate the refresh token, issue a new access token
+      description: Relies on the httpOnly refreshToken cookie set at login. Rotation is enforced — reusing an already-rotated-away token invalidates the whole session.
+      security: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AuthTokenPair' }
+        '401': { description: "Missing/invalid/expired refresh token, or reuse of a rotated-away token detected" }
+
+  /auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Request a password reset link
+      description: Always returns the same generic message whether or not the email exists, to prevent account enumeration.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '200': { description: "Generic confirmation, regardless of whether the email exists" }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/reset-password/{token}:
+    post:
+      tags: [Auth]
+      summary: Reset password using the emailed token
+      description: Forces logout of every existing session (clears refreshTokenHash) since the old password may have been compromised.
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, minLength: 8 }
+      responses:
+        '200': { description: "Password reset" }
+        '400': { description: "Invalid or expired token" }
+
+  /auth/verify-email/{token}:
+    get:
+      tags: [Auth]
+      summary: Verify email using the emailed token
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: "Email verified" }
+        '400': { description: "Invalid or expired token" }
+
+  /auth/complete-admin-setup/{token}:
+    post:
+      tags: [Auth]
+      summary: An invited admin sets their password and activates their account
+      description: Only path that can ever complete an admin invite — flips accountStatus pending to active.
+      security: []
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, minLength: 8 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AuthTokenPair' }
+        '400': { description: "Invalid or expired invite token" }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out (clears refresh cookie and session)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: "Logged out" }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/resend-verification-email:
+    post:
+      tags: [Auth]
+      summary: Resend the email verification link
+      description: Overwrites any existing token — only one verification link is ever valid at a time. Rate limited (5/hour).
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: "Verification email sent" }
+        '400': { description: "Already verified" }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Get the current authenticated user
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /admin/admins:
+    post:
+      tags: [Admin Management]
+      summary: Invite a new admin (super_admin only)
+      description: Creates the account with accountStatus "pending" and no password — an invite email is sent; the admin must complete setup before they can log in.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, username, firstName, lastName]
+              properties:
+                email: { type: string, format: email }
+                username: { type: string }
+                firstName: { type: string }
+                lastName: { type: string }
+                permissions:
+                  type: array
+                  items: { type: string, enum: [manage_products, manage_categories, manage_orders, manage_inventory, view_transactions] }
+                  default: []
+      responses:
+        '201': { description: "Admin invited" }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    get:
+      tags: [Admin Management]
+      summary: List all admins (super_admin only)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/User' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/admins/{id}/permissions:
+    patch:
+      tags: [Admin Management]
+      summary: Replace an admin's permission set (super_admin only)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [permissions]
+              properties:
+                permissions:
+                  type: array
+                  items: { type: string, enum: [manage_products, manage_categories, manage_orders, manage_inventory, view_transactions] }
+      responses:
+        '200': { description: "Permissions updated" }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /cart:
+    get:
+      tags: [Cart]
+      summary: View the current user's cart
+      description: Unavailable items (deactivated product, or stock below cart quantity) stay visible with available:false, excluded from totals — never silently removed.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Cart' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    delete:
+      tags: [Cart]
+      summary: Clear the cart
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Cart' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /cart/items:
+    post:
+      tags: [Cart]
+      summary: Add a product to the cart
+      description: |
+        Soft stock check only (Option C) — rejects if requested quantity exceeds current
+        stock, but does not reserve/decrement anything. The hard check happens at checkout.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [productId]
+              properties:
+                productId: { type: string }
+                quantity: { type: integer, minimum: 1, default: 1 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Cart' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: "Requested quantity (plus what's already in cart) exceeds available stock" }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /cart/items/{productId}:
+    patch:
+      tags: [Cart]
+      summary: Set the exact quantity of an item already in the cart
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: productId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [quantity]
+              properties:
+                quantity: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Cart' }
+        '404': { description: "Item not in cart" }
+        '409': { description: "Requested quantity exceeds available stock" }
+    delete:
+      tags: [Cart]
+      summary: Remove an item from the cart
+      description: Idempotent — removing an item not in the cart still returns 200, not 404.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: productId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Cart' }
+
+  /checkout:
+    post:
+      tags: [Checkout]
+      summary: Initiate checkout for the current cart
+      description: |
+        Requires a verified email. Hard-revalidates every cart item's stock/active status
+        (Option C's hard check). Server-computes the total from live product prices — never
+        trusts client-sent pricing. Idempotent: calling this twice with an unchanged cart
+        and a still-open PaymentIntent returns the SAME order/clientSecret rather than
+        creating a duplicate; a changed cart supersedes the old pending order instead.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [shippingAddress]
+              properties:
+                shippingAddress: { $ref: '#/components/schemas/ShippingAddress' }
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/CheckoutResult' }
+        '400': { description: "Cart is empty" }
+        '403': { description: "Email not verified" }
+        '409': { description: "A product's stock/availability changed since being added to cart, or a previous checkout already succeeded" }
+        '422': { $ref: '#/components/responses/ValidationError' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /orders:
+    get:
+      tags: [Orders]
+      summary: List the current user's own orders
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Order' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /orders/{id}:
+    get:
+      tags: [Orders]
+      summary: Get a single order belonging to the current user
+      description: Scoped by userId in the query itself — requesting another user's order id returns 404, not 403 (doesn't confirm the order exists).
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Order' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /orders/all:
+    get:
+      tags: [Admin Orders]
+      summary: List all orders across all users (requires manage_orders)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [pending, paid, failed, cancelled, refunded, shipped, delivered] }
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20, maximum: 100 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Order' }
+                  meta: { $ref: '#/components/schemas/PaginationMeta' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /orders/all/{id}:
+    get:
+      tags: [Admin Orders]
+      summary: Get any order by id (requires manage_orders)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Order' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /orders/all/{id}/status:
+    patch:
+      tags: [Admin Orders]
+      summary: Manually advance an order's fulfillment status (requires manage_orders)
+      description: |
+        Only accepts "shipped" or "delivered" — an admin can never manually set
+        paid/failed (Stripe webhook-owned) or refunded (refund-flow-owned). Valid
+        transitions are strictly paid -> shipped -> delivered; any other transition
+        (including skipping a step, or moving out of "delivered") is rejected.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [shipped, delivered] }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Order' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: "Invalid transition for the order's current status" }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /orders/all/{id}/refund:
+    post:
+      tags: [Admin Orders]
+      summary: Initiate a refund (requires manage_orders)
+      description: |
+        Asynchronous — this endpoint only kicks off the refund with Stripe (202 Accepted).
+        Order.status does NOT change here; it updates to "refunded" once the charge.refunded
+        webhook lands. Inventory is deliberately NOT auto-restocked.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '202':
+          description: Refund initiated with Stripe
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      refundId: { type: string }
+                      status: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: "Order not in a refundable status, has no PaymentIntent, or Stripe rejected the refund (e.g. already fully refunded)" }
+
+  /me/transactions:
+    get:
+      tags: [Payment History]
+      summary: The current user's own payment history
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Transaction' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /transactions:
+    get:
+      tags: [Payment History]
+      summary: List all transactions across all users (requires view_transactions)
+      description: Deliberately a SEPARATE permission from manage_orders — a support/finance admin might need to see payment history without managing fulfillment or refunds.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [pending, succeeded, failed] }
+        - name: type
+          in: query
+          schema: { type: string, enum: [payment, refund] }
+        - name: userId
+          in: query
+          schema: { type: string }
+        - name: orderId
+          in: query
+          schema: { type: string }
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20, maximum: 100 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Transaction' }
+                  meta: { $ref: '#/components/schemas/PaginationMeta' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /transactions/{id}:
+    get:
+      tags: [Payment History]
+      summary: Get any transaction by id (requires view_transactions)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Transaction' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+
+
+
+  /products:
+    get:
+      tags: [Products]
+      summary: List products — search, filter, paginate
+      description: |
+        Public; sending a valid admin access token additionally unlocks includeInactive.
+        Uses MongoDB $text search across name/tags/description (weighted) when `search`
+        is provided. List responses omit `description` (only present on the single-product
+        GET) to keep payloads smaller on the highest-traffic read path.
+      security: []
+      parameters:
+        - name: search
+          in: query
+          schema: { type: string }
+        - name: category
+          in: query
+          schema: { type: string, description: "categoryId" }
+        - name: minPrice
+          in: query
+          schema: { type: integer }
+        - name: maxPrice
+          in: query
+          schema: { type: integer }
+        - name: tags
+          in: query
+          schema: { type: string, description: "comma-separated" }
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20, maximum: 100 }
+        - name: includeInactive
+          in: query
+          schema: { type: string, enum: [true, false] }
+          description: Only takes effect for an authenticated admin/super_admin.
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Product' }
+                  meta: { $ref: '#/components/schemas/PaginationMeta' }
+    post:
+      tags: [Products]
+      summary: Create a product (requires manage_products)
+      description: Slug auto-generated from name, with collision handling (trail-shoes, trail-shoes-2, ...). Stock is set here at creation only — later changes go through PATCH /:id/stock.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, priceCents, categoryId]
+              properties:
+                name: { type: string }
+                description: { type: string }
+                priceCents: { type: integer, minimum: 0 }
+                stock: { type: integer, minimum: 0, default: 0 }
+                categoryId: { type: string }
+                images:
+                  type: array
+                  items: { $ref: '#/components/schemas/ProductImage' }
+                tags:
+                  type: array
+                  items: { type: string }
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Product' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { description: "Category not found" }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /products/low-stock:
+    get:
+      tags: [Products]
+      summary: List active products at or below a stock threshold (requires manage_inventory)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: threshold
+          in: query
+          schema: { type: integer, default: 5 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Product' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /products/upload-signature:
+    post:
+      tags: [Products]
+      summary: Get a signed Cloudinary upload signature (requires manage_products)
+      description: |
+        No file is ever sent to this API. The client uses this signature to upload directly
+        to Cloudinary; folder and allowed_formats are part of what's cryptographically
+        signed, not just returned as hints — Cloudinary itself rejects an upload that
+        doesn't match them.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      signature: { type: string }
+                      timestamp: { type: integer }
+                      apiKey: { type: string }
+                      cloudName: { type: string }
+                      folder: { type: string, example: products }
+                      allowedFormats: { type: string, example: "jpg,jpeg,png,webp" }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /products/{id}:
+    get:
+      tags: [Products]
+      summary: Get a single product
+      description: A deactivated product is invisible here to anyone who isn't an admin, same as in the list.
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Product' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Products]
+      summary: Update a product's details (requires manage_products)
+      description: A `stock` field in the body is silently stripped — stock only ever changes via PATCH /:id/stock. At least one field must be provided.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string }
+                priceCents: { type: integer, minimum: 0 }
+                categoryId: { type: string }
+                images:
+                  type: array
+                  items: { $ref: '#/components/schemas/ProductImage' }
+                tags:
+                  type: array
+                  items: { type: string }
+                isActive: { type: boolean }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Product' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    delete:
+      tags: [Products]
+      summary: Soft-delete a product (requires manage_products)
+      description: Sets isActive:false — never a hard delete, since past Orders snapshot a reference to this product. Does not delete Cloudinary assets.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: "Product deactivated" }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /products/{id}/stock:
+    patch:
+      tags: [Products]
+      summary: Update a product's stock count (requires manage_inventory)
+      description: Deliberately gated by a DIFFERENT permission than general product edits (manage_products).
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stock]
+              properties:
+                stock: { type: integer, minimum: 0 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Product' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /categories:
+    get:
+      tags: [Categories]
+      summary: List categories
+      security: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Category' }
+    post:
+      tags: [Categories]
+      summary: Create a category (requires manage_categories)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Category' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /categories/{id}:
+    patch:
+      tags: [Categories]
+      summary: Update a category (requires manage_categories)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                isActive: { type: boolean }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Category' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Categories]
+      summary: Delete a category (requires manage_categories)
+      description: Blocked with 409 if any active product still references this category — must reassign/deactivate those products first.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: "Category deleted" }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: "Active products still reference this category" }
+
+  /dashboard:
+    get:
+      tags: [Dashboard]
+      summary: Admin overview — product/order/revenue snapshot
+      description: |
+        Any admin or super_admin can access this — no specific permission required beyond
+        the role itself, unlike manage_orders/manage_inventory/view_transactions.
+        totalRevenueCents sums only paid/shipped/delivered orders.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: lowStockThreshold
+          in: query
+          schema: { type: integer, default: 5 }
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/DashboardSummary' }
+        '403': { $ref: '#/components/responses/Forbidden' }

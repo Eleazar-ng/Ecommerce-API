@@ -48,7 +48,7 @@ export const emailActionLimiter = rateLimit({
 export const checkoutLimiter = rateLimit({
   ...commonOptions,
   windowMs: 15 * 60 * 1000,
-  max: 10,
+  max: 15,
 });
 
 // Baseline, applied globally in app.ts as defense-in-depth. Generous enough that normal
